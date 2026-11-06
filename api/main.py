@@ -1,9 +1,20 @@
-from fastapi import FastAPI
+﻿from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import joblib
+import logging
 import time
 
 from prometheus_fastapi_instrumentator import Instrumentator
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s"
+)
+
+logger = logging.getLogger(__name__)
+
+MODEL_NAME = "random_forest"
+MODEL_VERSION = "1.0.0"
 
 app = FastAPI(
     title="Churn Prediction API",
@@ -11,6 +22,10 @@ app = FastAPI(
 )
 
 model = joblib.load("models/model.pkl")
+logger.info(
+    "Model loaded: model=%s model_version=%s",
+    MODEL_NAME, MODEL_VERSION
+)
 
 
 class ClientData(BaseModel):
@@ -47,35 +62,48 @@ def model_info():
 
 
 @app.post("/predict")
-def predict(data: ClientData):
+def predict(data: ClientData, request: Request):
 
     start = time.time()
+    client = request.client.host if request.client else "unknown"
 
-    values = [[
-        data.age,
-        data.anciennete,
-        data.revenu,
-        data.nb_reclamations,
-        data.montant_mensuel,
-        data.retards_paiement
-    ]]
+    try:
+        values = [[
+            data.age,
+            data.anciennete,
+            data.revenu,
+            data.nb_reclamations,
+            data.montant_mensuel,
+            data.retards_paiement
+        ]]
 
-    prediction = model.predict(values)[0]
-    probability = model.predict_proba(values)[0][1]
+        prediction = int(model.predict(values)[0])
+        probability = float(model.predict_proba(values)[0][1])
 
-    duration = time.time() - start
+    except Exception as exc:
+        duration_ms = (time.time() - start) * 1000
+        logger.error(
+            "operation=predict client=%s model=%s model_version=%s "
+            "status=error duration_ms=%.2f error=%s",
+            client, MODEL_NAME, MODEL_VERSION, duration_ms, exc,
+            exc_info=True
+        )
+        raise HTTPException(status_code=500, detail="Prediction error")
 
-    print(
-        f"prediction={prediction}, "
-        f"probability={probability:.4f}, "
-        f"duration={duration:.4f}s"
+    duration_ms = (time.time() - start) * 1000
+    label = "CHURN" if prediction == 1 else "NO_CHURN"
+
+    logger.info(
+        "operation=predict client=%s model=%s model_version=%s "
+        "status=success prediction=%s probability=%.4f duration_ms=%.2f",
+        client, MODEL_NAME, MODEL_VERSION, label, probability, duration_ms
     )
 
     return {
-        "prediction": "CHURN" if prediction == 1 else "NO_CHURN",
-        "probability": round(float(probability), 4),
-        "model_version": "1.0.0",
-        "duration_ms": round(duration * 1000, 2)
+        "prediction": label,
+        "probability": round(probability, 4),
+        "model_version": MODEL_VERSION,
+        "duration_ms": round(duration_ms, 2)
     }
 
 
